@@ -15,9 +15,11 @@ from pydantic_ai import Agent, NativeOutput
 from pydantic_ai.exceptions import ModelHTTPError
 from pydantic_ai.models import Model
 from pydantic_ai.models.ollama import OllamaModel
+from pydantic_ai.models.openai import OpenAIChatModel, OpenAIResponsesModel
 from pydantic_ai.models.openrouter import OpenRouterModel
 from pydantic_ai.profiles.openai import OpenAIModelProfile
 from pydantic_ai.providers.ollama import OllamaProvider
+from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.providers.openrouter import OpenRouterProvider
 from pydantic import AliasChoices, BaseModel, Field, field_validator
 
@@ -455,7 +457,34 @@ Find the number of compelling segments requested in the task (usually 2-5) that 
 _transcript_agent: Optional[Agent[None, TranscriptAnalysis]] = None
 _transcript_agent_signature: Optional[tuple[str | None, ...]] = None
 
-SUPPORTED_LLM_PROVIDERS = {"google", "google-gla", "openai", "openrouter", "anthropic", "ollama"}
+SUPPORTED_LLM_PROVIDERS = {
+    "google",
+    "google-gla",
+    "openai",
+    "openrouter",
+    "anthropic",
+    "ollama",
+    "opencode",
+    "opencode-go",
+    "xai",
+    "custom",
+}
+
+# OpenCode Go models served on the Responses API (not /chat/completions).
+# Source: https://opencode.ai/v2/docs/console/go/ endpoint table.
+OPENCODE_RESPONSES_MODELS = frozenset(
+    {
+        "grok-4.7",
+        "grok-4.6",
+        "gpt-6-luna",
+        "gpt-5.6-luna",
+        "muse-spark-1.3-contributor",
+        "muse-spark-1.2-contributor",
+    }
+)
+
+# Distinctive client id so OpenCode Go can attribute our non-coding traffic.
+OPENCODE_USER_AGENT = "supoclip/1.0 (opencode-go)"
 
 
 def _split_llm_name(model_name: str) -> tuple[str, str | None]:
@@ -473,7 +502,8 @@ def _get_missing_llm_key_error(model_name: str, runtime_config: Config) -> Optio
     if provider not in SUPPORTED_LLM_PROVIDERS:
         return (
             f"Unsupported LLM provider '{provider}'. "
-            "Use google-gla:*, openai:*, openrouter:*, anthropic:*, or ollama:*."
+            "Use google-gla:*, openai:*, openrouter:*, anthropic:*, ollama:*, "
+            "opencode-go:*, xai:*, or custom:*."
         )
 
     if not provider_model_name:
@@ -511,7 +541,54 @@ def _get_missing_llm_key_error(model_name: str, runtime_config: Config) -> Optio
         # are optional and passed through as environment variables.
         return None
 
+    if provider in {"opencode", "opencode-go"}:
+        if not runtime_config.opencode_api_key:
+            return (
+                "Selected LLM provider is OpenCode Go, but no key is set. "
+                "Set OPENCODE_API_KEY (or OPENCODE_GO_API_KEY) from the OpenCode console. "
+                "Note: this needs an active OpenCode Go subscription; the free tier "
+                "only works from inside the OpenCode client."
+            )
+        return None
+
+    if provider == "xai":
+        if not runtime_config.xai_api_key:
+            return (
+                "Selected LLM provider is xAI, but XAI_API_KEY is not set. "
+                "Create one at https://console.x.ai/ (a grok.com subscription "
+                "alone does not include API access)."
+            )
+        return None
+
+    if provider == "custom":
+        if not runtime_config.custom_base_url:
+            return (
+                "Selected LLM provider is custom, but CUSTOM_BASE_URL is not set. "
+                "Set CUSTOM_BASE_URL to an OpenAI-compatible endpoint "
+                "(and CUSTOM_API_KEY if it needs one)."
+            )
+        return None
+
     return None
+
+
+def _build_opencode_provider(runtime_config: Config) -> OpenAIProvider:
+    """Provider for OpenCode Go (chat, responses and free models).
+
+    Go requires a stable x-opencode-session header for routing/caching, so we
+    attach our own client instead of relying on the default one.
+    """
+    http_client = httpx.AsyncClient(
+        headers={
+            "x-opencode-session": runtime_config.resolve_opencode_session_id(),
+            "User-Agent": OPENCODE_USER_AGENT,
+        }
+    )
+    return OpenAIProvider(
+        base_url=runtime_config.resolve_opencode_base_url(),
+        api_key=runtime_config.opencode_api_key,
+        http_client=http_client,
+    )
 
 
 def _build_transcript_model(
@@ -538,6 +615,44 @@ def _build_transcript_model(
                 "openrouter_reasoning": {"effort": "low"},
                 "max_tokens": 8192,
             },
+        )
+    if provider in {"opencode", "opencode-go"}:
+        if not provider_model_name:
+            raise RuntimeError(
+                "Selected LLM provider is OpenCode Go, but no model name was provided. "
+                "Use the format opencode-go:<model>, for example "
+                "opencode-go:cat-jam-free or opencode-go:grok-4.7."
+            )
+        provider_obj = _build_opencode_provider(runtime_config)
+        if provider_model_name in OPENCODE_RESPONSES_MODELS:
+            return OpenAIResponsesModel(provider_model_name, provider=provider_obj)
+        return OpenAIChatModel(provider_model_name, provider=provider_obj)
+    if provider == "xai":
+        if not provider_model_name:
+            raise RuntimeError(
+                "Selected LLM provider is xAI, but no model name was provided. "
+                "Use the format xai:<model>, for example xai:grok-4."
+            )
+        return OpenAIChatModel(
+            provider_model_name,
+            provider=OpenAIProvider(
+                base_url=runtime_config.resolve_xai_base_url(),
+                api_key=runtime_config.xai_api_key,
+            ),
+        )
+    if provider == "custom":
+        if not provider_model_name:
+            raise RuntimeError(
+                "Selected LLM provider is custom, but no model name was provided. "
+                "Use the format custom:<model>, for example custom:qwen3-8b, "
+                "and set CUSTOM_BASE_URL."
+            )
+        return OpenAIChatModel(
+            provider_model_name,
+            provider=OpenAIProvider(
+                base_url=(runtime_config.custom_base_url or "").rstrip("/"),
+                api_key=runtime_config.custom_api_key or "not-needed",
+            ),
         )
     if provider != "ollama":
         return model_name
@@ -571,6 +686,13 @@ def get_transcript_agent() -> Agent[None, TranscriptAnalysis]:
         runtime_config.anthropic_api_key,
         runtime_config.ollama_base_url,
         runtime_config.ollama_api_key,
+        runtime_config.opencode_api_key,
+        runtime_config.opencode_base_url,
+        runtime_config.opencode_session_id,
+        runtime_config.xai_api_key,
+        runtime_config.xai_base_url,
+        runtime_config.custom_base_url,
+        runtime_config.custom_api_key,
     )
     if _transcript_agent is None or _transcript_agent_signature != signature:
         apply_settings_to_process_env(runtime_config.as_runtime_settings())
@@ -650,6 +772,13 @@ def get_rerank_agent() -> Agent[None, CandidateRanking]:
         runtime_config.anthropic_api_key,
         runtime_config.ollama_base_url,
         runtime_config.ollama_api_key,
+        runtime_config.opencode_api_key,
+        runtime_config.opencode_base_url,
+        runtime_config.opencode_session_id,
+        runtime_config.xai_api_key,
+        runtime_config.xai_base_url,
+        runtime_config.custom_base_url,
+        runtime_config.custom_api_key,
     )
     if _rerank_agent is None or _rerank_agent_signature != signature:
         apply_settings_to_process_env(runtime_config.as_runtime_settings())

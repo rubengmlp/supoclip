@@ -1,5 +1,6 @@
 from dotenv import load_dotenv
 import os
+import uuid
 
 from .runtime_settings import get_cached_setting, setting_prefers_admin
 
@@ -8,6 +9,12 @@ load_dotenv()
 _config_override = None
 LOCAL_OLLAMA_BASE_URL = "http://localhost:11434/v1"
 DOCKER_OLLAMA_BASE_URL = "http://host.docker.internal:11434/v1"
+DEFAULT_OPENCODE_BASE_URL = "https://opencode.ai/inference/go/v1"
+DEFAULT_XAI_BASE_URL = "https://api.x.ai/v1"
+
+# Stable per-process session id sent as x-opencode-session so OpenCode Go can
+# route and cache our requests. Override per deployment with OPENCODE_SESSION_ID.
+_process_opencode_session_id = f"supoclip-{uuid.uuid4().hex[:12]}"
 
 
 class Config:
@@ -20,10 +27,25 @@ class Config:
         self.youtube_data_api_key = self._get_runtime_setting("YOUTUBE_DATA_API_KEY")
         self.ollama_base_url = self._get_runtime_setting("OLLAMA_BASE_URL")
         self.ollama_api_key = self._get_runtime_setting("OLLAMA_API_KEY")
+        # OpenCode Go (paid sub, includes Grok + free unlimited models).
+        # Accepts OPENCODE_API_KEY or OPENCODE_GO_API_KEY.
+        self.opencode_api_key = self._get_runtime_setting(
+            "OPENCODE_API_KEY"
+        ) or self._get_runtime_setting("OPENCODE_GO_API_KEY")
+        self.opencode_base_url = self._get_optional_env("OPENCODE_BASE_URL")
+        self.opencode_session_id = self._get_optional_env("OPENCODE_SESSION_ID")
+        # Direct xAI API (console.x.ai key; a grok.com subscription alone is not enough).
+        self.xai_api_key = self._get_runtime_setting("XAI_API_KEY")
+        self.xai_base_url = self._get_optional_env("XAI_BASE_URL")
+        # Generic OpenAI-compatible gateway (LiteLLM proxy, Ollama Cloud, etc.).
+        self.custom_base_url = self._get_optional_env("CUSTOM_BASE_URL")
+        self.custom_api_key = self._get_runtime_setting("CUSTOM_API_KEY")
 
         self.whisper_model = os.getenv("WHISPER_MODEL") or os.getenv("WHISPER_MODEL_SIZE", "base")
+        # Fork default: free local transcription. Set TRANSCRIPTION_PROVIDER=assemblyai
+        # (plus ASSEMBLY_AI_API_KEY) only if you want the paid cloud path.
         self.transcription_provider = self._normalize_transcription_provider(
-            os.getenv("TRANSCRIPTION_PROVIDER", "assemblyai")
+            os.getenv("TRANSCRIPTION_PROVIDER", "whisper")
         )
         # Empty means auto-detect the spoken language; otherwise an AssemblyAI
         # language code such as "es" or "en_us" forces it.
@@ -200,6 +222,13 @@ class Config:
             "ANTHROPIC_API_KEY": self.anthropic_api_key,
             "OLLAMA_BASE_URL": self.ollama_base_url,
             "OLLAMA_API_KEY": self.ollama_api_key,
+            "OPENCODE_API_KEY": self.opencode_api_key,
+            "OPENCODE_BASE_URL": self.opencode_base_url,
+            "OPENCODE_SESSION_ID": self.opencode_session_id,
+            "XAI_API_KEY": self.xai_api_key,
+            "XAI_BASE_URL": self.xai_base_url,
+            "CUSTOM_BASE_URL": self.custom_base_url,
+            "CUSTOM_API_KEY": self.custom_api_key,
             "YOUTUBE_DATA_API_KEY": self.youtube_data_api_key,
             "APIFY_API_TOKEN": self.apify_api_token,
             "PEXELS_API_KEY": self.pexels_api_key,
@@ -263,6 +292,15 @@ class Config:
     def resolve_ollama_base_url(self) -> str:
         return self.ollama_base_url or self._default_ollama_base_url()
 
+    def resolve_opencode_base_url(self) -> str:
+        return (self.opencode_base_url or DEFAULT_OPENCODE_BASE_URL).rstrip("/")
+
+    def resolve_opencode_session_id(self) -> str:
+        return self.opencode_session_id or _process_opencode_session_id
+
+    def resolve_xai_base_url(self) -> str:
+        return (self.xai_base_url or DEFAULT_XAI_BASE_URL).rstrip("/")
+
     @staticmethod
     def _default_ollama_base_url() -> str:
         if os.path.exists("/.dockerenv"):
@@ -272,8 +310,12 @@ class Config:
     def _infer_default_llm(self) -> str:
         """
         Infer a usable default model based on whichever API key is present.
-        Falls back to Google for backward compatibility.
+        Free/subscription paths first, then hosted keys for backward compatibility.
         """
+        if self.opencode_api_key:
+            return "opencode-go:cat-jam-free"
+        if self.xai_api_key:
+            return "xai:grok-4"
         if self.google_api_key:
             return "google-gla:gemini-3-flash-preview"
         if self.openai_api_key:

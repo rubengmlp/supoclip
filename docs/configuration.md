@@ -23,7 +23,8 @@ In most cases, edit `.env` and then rebuild or restart the stack.
 
 | Variable | Required | Purpose |
 |---|---|---|
-| `ASSEMBLY_AI_API_KEY` | Yes | Enables word-level transcription used for clip extraction and subtitles |
+| `TRANSCRIPTION_PROVIDER` | No (`whisper` default in this fork) | `whisper` (free, local), `assemblyai` (paid cloud), or `youtube_captions` (YouTube links only) |
+| `ASSEMBLY_AI_API_KEY` | Only if `TRANSCRIPTION_PROVIDER=assemblyai` | Enables word-level transcription used for clip extraction and subtitles |
 
 ### LLM selection
 
@@ -35,6 +36,18 @@ In most cases, edit `.env` and then rebuild or restart the stack.
 | `ANTHROPIC_API_KEY` | If using Anthropic | Required for `anthropic:*` models |
 | `OLLAMA_BASE_URL` | If using Ollama remotely | Base URL for Ollama-compatible endpoints |
 | `OLLAMA_API_KEY` | Optional | Used for hosted Ollama providers such as Ollama Cloud |
+| `OPENCODE_API_KEY` / `OPENCODE_GO_API_KEY` | If using OpenCode Go | Required for `opencode-go:*` models (needs an **active** Go subscription; free tier is client-locked) |
+| `OPENCODE_BASE_URL` | Optional | Override, default `https://opencode.ai/inference/go/v1` |
+| `OPENCODE_SESSION_ID` | Optional | Stable session id sent as `x-opencode-session`; a per-process one is generated when unset |
+| `XAI_API_KEY` | If using xAI | Required for `xai:*` models (key from `console.x.ai`; a grok.com subscription alone is not enough) |
+| `XAI_BASE_URL` | Optional | Override, default `https://api.x.ai/v1` |
+| `CUSTOM_BASE_URL` | If using `custom:*` | Any OpenAI-compatible endpoint (LiteLLM proxy, etc.) |
+| `CUSTOM_API_KEY` | Optional | API key for the custom endpoint (`not-needed` is sent when empty) |
+
+Free recipes: `TRANSCRIPTION_PROVIDER=whisper` + `LLM=ollama:<local-model>` is $0
+with no account; OpenRouter models ending in `:free` (e.g.
+`openrouter:qwen/qwen3-8b:free`) need only a free `OPENROUTER_API_KEY`.
+`opencode-go:cat-jam-free` / `opencode-go:grok-4.7` spend your Go subscription.
 
 The backend can infer a default LLM from whichever API key is present, but setting `LLM` explicitly is safer and easier to debug.
 
